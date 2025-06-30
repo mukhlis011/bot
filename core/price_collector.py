@@ -24,7 +24,7 @@ class PriceCollector:
                 try:
                     price = exchange.fetch_ticker(symbol)
                     
-                    # Periksa jika harga tidak valid
+                    # Validasi harga
                     if price is None or price <= 0:
                         logger.warning(f"⚠️ Harga {symbol} di {exchange_name} tidak valid: {price}")
                         prices[exchange_name][symbol] = 0.0

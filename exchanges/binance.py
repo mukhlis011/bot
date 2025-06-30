@@ -55,12 +55,10 @@ class Binance(Exchange):
 
     def fetch_ticker(self, symbol):
         try:
-            # PERUBAHAN PENTING: Endpoint ticker tidak memerlukan signature
+            # Endpoint public tidak memerlukan signature
             symbol_pair = symbol.upper() + "USDT"
             url = f"{self.BASE_URL}/api/v3/ticker/price"
-            params = {"symbol": symbol_pair}
-            
-            response = self.session.get(url, params=params, timeout=10)
+            response = self.session.get(url, params={"symbol": symbol_pair}, timeout=10)
             response.raise_for_status()
             data = response.json()
             return float(data["price"])

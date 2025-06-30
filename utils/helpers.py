@@ -11,17 +11,18 @@ from config.settings import (
     MIN_TRADE_AMOUNTS
 )
 
-# Dapatkan logger
 logger = logging.getLogger(__name__)
 
-# Fungsi untuk mendapatkan kurs USD/IDR
 def get_usd_to_idr_rate():
-    if os.getenv("USD_TO_IDR_RATE"):
+    # 1. Coba dari environment variable
+    env_rate = os.getenv("USD_TO_IDR_RATE")
+    if env_rate:
         try:
-            return float(os.getenv("USD_TO_IDR_RATE"))
+            return float(env_rate)
         except ValueError:
             logger.warning("⚠️ Format USD_TO_IDR_RATE tidak valid")
     
+    # 2. Coba dari API
     try:
         response = requests.get(
             "https://api.frankfurter.app/latest?from=USD&to=IDR", 
@@ -33,7 +34,8 @@ def get_usd_to_idr_rate():
     except Exception as e:
         logger.warning(f"⚠️ Gagal ambil kurs dari API: {e}")
     
-    return float(os.getenv("FALLBACK_USD_TO_IDR_RATE", "15000"))
+    # 3. Fallback ke nilai default
+    return 16000
 
 def save_last_usd_to_idr_rate(rate):
     """Simpan kurs terakhir ke file"""

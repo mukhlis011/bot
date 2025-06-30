@@ -66,7 +66,7 @@ class KuCoin(Exchange):
         }
 
     def fetch_ticker(self, symbol):
-        endpoint = f"/api/v1/market/orderbook/level1"
+        endpoint = "/api/v1/market/orderbook/level1"
         params = {"symbol": f"{symbol}-USDT"}
         headers = self._generate_signature(endpoint, "GET", params)
         
