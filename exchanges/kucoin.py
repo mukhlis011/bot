@@ -1,0 +1,165 @@
+import os
+import hmac
+import base64
+import hashlib
+import time
+import requests
+import json
+import logging
+from .exchange_interface import Exchange
+
+logger = logging.getLogger(__name__)
+
+class KuCoin(Exchange):
+    BASE_URL = "https://api.kucoin.com"
+    
+    def __init__(self):
+        self.api_key = os.getenv("KUCOIN_API_KEY")
+        self.api_secret = os.getenv("KUCOIN_API_SECRET")
+        self.api_passphrase = os.getenv("KUCOIN_API_PASSPHRASE")
+        if not all([self.api_key, self.api_secret, self.api_passphrase]):
+            raise ValueError("KuCoin API key, secret, dan passphrase wajib di-set")
+        self.session = requests.Session()
+        logger.info("✅ KuCoin client initialized successfully")
+
+    def get_base_currency(self):
+        return "USDT"
+
+    def _generate_signature(self, endpoint, method, params=None, body=None):
+        now = str(int(time.time() * 1000))
+        str_to_sign = now + method.upper() + endpoint
+        
+        if params:
+            sorted_params = sorted(params.items())
+            query_string = "&".join([f"{k}={v}" for k, v in sorted_params])
+            str_to_sign += f"?{query_string}"
+        
+        if body:
+            str_to_sign += json.dumps(body, separators=(',', ':'), ensure_ascii=False)
+        
+        # Decode secret
+        secret_decoded = base64.b64decode(self.api_secret)
+        signature = base64.b64encode(
+            hmac.new(
+                secret_decoded,
+                str_to_sign.encode('utf-8'),
+                hashlib.sha256
+            ).digest()
+        ).decode()
+        
+        # Encode passphrase
+        passphrase = base64.b64encode(
+            hmac.new(
+                secret_decoded,
+                self.api_passphrase.encode('utf-8'),
+                hashlib.sha256
+            ).digest()
+        ).decode()
+        
+        return {
+            "KC-API-KEY": self.api_key,
+            "KC-API-SIGN": signature,
+            "KC-API-TIMESTAMP": now,
+            "KC-API-PASSPHRASE": passphrase,
+            "KC-API-KEY-VERSION": "2",
+            "Content-Type": "application/json"
+        }
+
+    def fetch_ticker(self, symbol):
+        endpoint = f"/api/v1/market/orderbook/level1"
+        params = {"symbol": f"{symbol}-USDT"}
+        headers = self._generate_signature(endpoint, "GET", params)
+        
+        try:
+            response = self.session.get(
+                f"{self.BASE_URL}{endpoint}", 
+                params=params,
+                headers=headers,
+                timeout=10
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            if data.get("code") == "200000" and "data" in data:
+                return float(data["data"]["price"])
+            else:
+                logger.error(f"❌ Ticker price KuCoin {symbol} tidak ditemukan: {data}")
+                return 0.0
+                
+        except Exception as e:
+            logger.error(f"❌ Gagal fetch ticker KuCoin {symbol}: {e}")
+            return 0.0
+
+    def fetch_balance(self):
+        endpoint = "/api/v1/accounts"
+        headers = self._generate_signature(endpoint, "GET")
+        
+        try:
+            response = self.session.get(
+                f"{self.BASE_URL}{endpoint}",
+                headers=headers,
+                timeout=10
+            )
+            if response.status_code == 401:
+                logger.error("❌ Autentikasi KuCoin gagal. Periksa API Key, Secret, dan Passphrase")
+                return {}
+                
+            response.raise_for_status()
+            data = response.json()
+            
+            if data.get("code") == "200000":
+                balances = {}
+                for item in data["data"]:
+                    if item["type"] == "trade":
+                        currency = item["currency"]
+                        free = float(item["available"])
+                        balances[currency] = {"free": free}
+                return balances
+            else:
+                logger.error(f"❌ Gagal fetch balance KuCoin: {data.get('msg')}")
+                return {}
+        except Exception as e:
+            logger.error(f"❌ Error fetch balance KuCoin: {e}")
+            return {}
+
+    def transfer_coin(self, symbol, amount, address, tag=None, network=None):
+        endpoint = "/api/v2/withdrawals"
+        body = {
+            "currency": symbol.upper(),
+            "address": address,
+            "amount": amount,
+            "chain": network or self._get_network(symbol)
+        }
+        if tag:
+            body["memo"] = tag
+            
+        headers = self._generate_signature(endpoint, "POST", body=body)
+        try:
+            response = self.session.post(
+                f"{self.BASE_URL}{endpoint}", 
+                json=body, 
+                headers=headers, 
+                timeout=20
+            )
+            response.raise_for_status()
+            data = response.json()
+            if data.get("code") == "200000":
+                logger.info(f"✅ Withdrawal KuCoin {amount} {symbol.upper()} to {address} sukses")
+                return True
+            else:
+                logger.error(f"❌ Withdrawal KuCoin gagal: {data}")
+                return False
+        except Exception as e:
+            logger.error(f"❌ Withdrawal KuCoin error: {e}")
+            return False
+
+    def _get_network(self, symbol):
+        networks = {
+            "BTC": "BTC",
+            "ETH": "ERC20",
+            "BNB": "BEP20",
+            "XRP": "XRP",
+            "USDT": "ERC20",
+            "SHIB": "ERC20"
+        }
+        return networks.get(symbol, "ERC20")

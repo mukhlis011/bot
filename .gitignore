@@ -1,0 +1,55 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# VSCode / PyCharm / IDE
+.vscode/
+.idea/
+
+# Logs and temporary files
+*.log
+logs/
+data/logs/
+*.pid
+
+# Environment config
+.env
+.env.*
+
+# Compiled files
+*.so
+*.dll
+*.out
+*.o
+*.a
+
+# MacOS
+.DS_Store
+
+# Jupyter/IPython
+.ipynb_checkpoints
+
+# System files
+Thumbs.db
+desktop.ini
+
+# Model & temporary artifacts
+*.h5
+*.joblib
+*.json
+*.csv
+*.pkl
+*.npy
+last_rate.json
+data/last_rate.json
+
+# Build artifacts
+build/
+dist/
+*.egg-info/

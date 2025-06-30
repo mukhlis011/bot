@@ -1,0 +1,1734 @@
+struktur folder
+1. config/
+	- __pycache__/
+	- settings.py
+2. core/
+	- __pycache__/
+	- arbitrage_engine.py
+	- executor.py
+	- price_collector.py
+	- transfer_executor.py
+3. data/
+	- logs/
+		- bot.log
+4. exchanges/
+	- __pycache__/
+	- binance.py
+	- indodax.py
+	- kucoin.py
+	- exchange_interface.py
+5. src/
+	- __pycache__/
+	- data/
+		- logs/
+			- bot.log
+	- arbitrage_logic.py
+	- exchanges.py
+	- main.py
+	- utils.py
+6. strategies/
+	- __pycache__/
+	- cross_exchange.py
+	- transfer_only.py
+	- triangular.py
+7. utils/
+	- __pycache__/
+	- helpers.py
+	- logger.py
+8. venv/
+9. main.py
+
+
+
+
+1. config/
+	- __pycache__/
+	- settings.py:
+	import os
+from dotenv import load_dotenv
+load_dotenv()
+
+# Mode bot
+SIMULATION_MODE = False
+NO_TRADE_MODE = False
+
+# Threshold Profit
+MIN_PROFIT_THRESHOLD_USD = float(os.getenv("MIN_PROFIT_THRESHOLD_USD", "0.2"))
+MIN_PROFIT_THRESHOLD_PERCENT = float(os.getenv("MIN_PROFIT_THRESHOLD_PERCENT", "0.1"))
+
+# Biaya Transfer
+TRANSFER_FEE = {
+    'BTC': float(os.getenv("TRANSFER_FEE_BTC", "0.000002")),
+    'XRP': float(os.getenv("TRANSFER_FEE_XRP", "0.1")),
+    'SHIB': float(os.getenv("TRANSFER_FEE_SHIB", "1000000")),
+    'BNB': float(os.getenv("TRANSFER_FEE_BNB", "0.001"))
+}
+
+# Biaya Transfer Fiat
+TRANSFER_FEE_IDR_TO_USDT = float(os.getenv("TRANSFER_FEE_IDR_TO_USDT", "10000"))
+
+# Minimum trade amount
+MIN_TRADE_AMOUNTS = {
+    'BTC': 0.00001,
+    'ETH': 0.0001,
+    'BNB': 0.001,
+    'XRP': 1,
+    'SHIB': 1000000
+}
+
+# Waktu transfer rata-rata (detik)
+TRANSFER_TIME_COIN = 600  # 10 menit untuk transfer kripto
+TRANSFER_TIME_FIAT = 300  # 5 menit untuk transfer fiat
+
+# Jaringan blockchain untuk transfer
+TRANSFER_NETWORKS = {
+    'BTC': 'BTC',
+    'ETH': 'ERC20',
+    'BNB': 'BNB',
+    'XRP': 'XRP',
+    'SHIB': 'ERC20'
+}
+
+SUPPORTED_SYMBOLS = os.getenv('SUPPORTED_SYMBOLS', 'BTC,XRP,SHIB,BNB').split(',')
+
+
+2. core/
+	- __pycache__/
+	- arbitrage_engine.py:
+	# core/arbitrage_engine.py
+from strategies.cross_exchange import check_arbitrage_opportunity
+from strategies.transfer_only import check_transfer_opportunity  # Hanya impor fungsi yang benar
+from utils.helpers import get_usd_to_idr_rate
+from core.executor import RealTradeExecutor
+from utils.logger import logger
+
+class ArbitrageEngine:
+    def __init__(self, price_collector, exchanges):
+        """
+        Inisialisasi engine arbitrase dengan semua exchange
+        Args:
+            price_collector: Objek untuk mengumpulkan harga
+            exchanges: Daftar instance exchange
+        """
+        self.price_collector = price_collector
+        self.exchanges = exchanges
+        self.usd_to_idr = get_usd_to_idr_rate()
+        self.strategy = check_arbitrage_opportunity
+
+    def run(self):
+        """
+        Jalankan siklus deteksi arbitrase
+        Returns:
+            list: Daftar peluang arbitrase
+        """
+        try:
+            # Kumpulkan harga dari semua exchange
+            prices = self.price_collector.collect_prices(self.exchanges)
+            
+            # Jalankan strategi arbitrase dengan semua exchange
+            return self.strategy(prices, self.usd_to_idr, self.exchanges)
+        except Exception as e:
+            logger.error(f"🚨 Error di ArbitrageEngine.run: {e}")
+            raise
+			
+			
+	- executor.py:
+	# core/executor.py
+from utils.helpers import calculate_net_profit
+from config.settings import MIN_PROFIT_THRESHOLD_USD
+from utils.logger import logger
+
+class RealTradeExecutor:
+    def __init__(self, *exchanges):
+        self.exchanges = {ex.__class__.__name__.lower(): ex for ex in exchanges}
+
+    def execute(self, opportunity):
+        """
+        Jalankan transaksi jika layak
+        """
+        symbol = opportunity.get('symbol')
+        buy_exchange_name = opportunity.get('buy_exchange', '').lower()
+        sell_exchange_name = opportunity.get('sell_exchange', '').lower()
+        buy_price = opportunity.get('buy_price', 0)
+        sell_price = opportunity.get('sell_price', 0)
+        usd_to_idr = opportunity.get('usd_to_idr', 1.0)
+
+        # Dapatkan instance exchange
+        buy_exchange = self.exchanges.get(buy_exchange_name)
+        sell_exchange = self.exchanges.get(sell_exchange_name)
+
+        if not buy_exchange or not sell_exchange:
+            logger.error("🚨 Exchange tidak ditemukan")
+            return False
+
+        # Dapatkan alamat wallet
+        try:
+            wallet_info = get_wallet_address(sell_exchange, symbol)
+        except Exception as e:
+            logger.warning(f"⚠️ Alamat wallet tidak ditemukan: {e}")
+            return False
+
+        # Dapatkan saldo aktual
+        try:
+            buy_balance_data = buy_exchange.fetch_balance()
+            sell_balance_data = sell_exchange.fetch_balance()
+        except Exception as e:
+            logger.error(f"🚨 Gagal fetch balance: {e}")
+            return False
+
+        # Pastikan semua data tersedia
+        buy_fiat_balance = 0
+        buy_fiat_balance_usd = 0
+        sell_balance = 0
+
+        if buy_exchange.get_base_currency() in ['USDT', 'USD']:
+            buy_fiat_balance = buy_balance_data.get('USDT', {}).get('free', 0) + buy_balance_data.get('USD', {}).get('free', 0)
+            buy_fiat_balance_usd = buy_fiat_balance
+        else:
+            buy_fiat_balance = buy_balance_data.get('IDR', {}).get('free', 0)
+            buy_fiat_balance_usd = buy_fiat_balance / usd_to_idr
+
+        sell_balance = sell_balance_data.get(symbol, {}).get('free', 0)
+
+        # Hitung jumlah maksimum yang bisa ditransfer
+        max_by_fiat = buy_fiat_balance_usd / buy_price
+        trade_amount = min(sell_balance, max_by_fiat)
+        min_amount = MIN_TRADE_AMOUNTS.get(symbol, 0.001)
+        required_amount = get_required_amount_for_profit(
+            symbol=symbol,
+            buy_price=buy_price,
+            sell_price=sell_price,
+            usd_to_idr=usd_to_idr
+        )
+
+        # Tampilkan log detail
+        logger.info(f"""
+        ┌────────────────────────────────────────────────────┐
+        │ 📊 Rincian Peluang Arbitrase: {symbol}          │
+        ├────────────────────────────────────────────────────┤
+        │ Volume Minimum: {required_amount:.6f} {symbol}     │
+        │ Saldo Penjual: {sell_balance:.6f} {symbol}        │
+        │ Saldo Pembeli: {buy_fiat_balance:.6f} {buy_exchange.get_base_currency()} (≈${buy_fiat_balance_usd:.6f} USD) │
+        └────────────────────────────────────────────────────┘
+        """)
+
+        # Cek apakah layak secara volume dan profit
+        if trade_amount < min_amount:
+            logger.warning(f"⚠️ Volume terlalu kecil untuk {symbol}. Minimum: {min_amount} {symbol}.")
+            return False
+
+        # Cek apakah ada cukup saldo
+        if not check_balance_on_exchange(buy_exchange, symbol, trade_amount, buy_price):
+            logger.warning(f"⚠️ Saldo tidak mencukupi untuk membeli {trade_amount} {symbol}")
+            return False
+
+        if not check_balance_on_exchange(sell_exchange, symbol, trade_amount, sell_price):
+            logger.warning(f"⚠️ Saldo tidak mencukupi untuk menjual {trade_amount} {symbol}")
+            return False
+
+        # Eksekusi transfer koin
+        try:
+            logger.info(f"🔁 Memulai proses transfer {trade_amount} {symbol}...")
+            success = buy_exchange.transfer_coin(
+                symbol=symbol,
+                amount=trade_amount,
+                address=wallet_info['address'],
+                tag=wallet_info.get('destination_tag'),
+                network=wallet_info.get('network')
+            )
+            if success:
+                logger.info(f"✅ Transfer {symbol} berhasil")
+                return True
+            else:
+                logger.error(f"❌ Transfer {symbol} gagal")
+                return False
+        except Exception as e:
+            logger.error(f"🚨 Gagal eksekusi transfer: {e}")
+            return False
+			
+			
+	- price_collector.py:
+	# core/price_collector.py
+from utils.logger import logger
+from utils.helpers import get_usd_to_idr_rate, convert_to_usd, get_supported_symbols
+
+class PriceCollector:
+    def __init__(self, exchanges):
+        self.exchanges = exchanges
+        self.symbols = get_supported_symbols()  # Pastikan fungsi ini ada di utils.helpers
+
+    def collect_prices(self):
+        """
+        Kumpulkan harga dari semua exchange
+        Returns:
+            dict: Harga untuk setiap simbol di setiap exchange
+        """
+        prices = {}
+        for exchange in self.exchanges:
+            exchange_name = exchange.__class__.__name__.lower()
+            prices[exchange_name] = {}
+            
+            for symbol in self.symbols:
+                try:
+                    price = exchange.fetch_ticker(symbol)
+                    if price is None or not isinstance(price, (int, float)):
+                        logger.warning(f"⚠️ Harga {symbol} dari {exchange_name} tidak valid, menggunakan default 0.0")
+                        price = 0.0
+                    prices[exchange_name][symbol] = price
+                    logger.debug(f"📊 {exchange_name.upper()} {symbol}: {price}")
+                except Exception as e:
+                    logger.error(f"❌ Gagal ambil harga {symbol} dari {exchange_name}: {e}")
+                    prices[exchange_name][symbol] = 0.0
+                    
+        return prices
+		
+	- transfer_executor.py:
+		# core/price_collector.py
+from utils.logger import logger
+from utils.helpers import get_usd_to_idr_rate, convert_to_usd, get_supported_symbols
+
+class PriceCollector:
+    def __init__(self, exchanges):
+        self.exchanges = exchanges
+        self.symbols = get_supported_symbols()  # Pastikan fungsi ini ada di utils.helpers
+
+    def collect_prices(self):
+        """
+        Kumpulkan harga dari semua exchange
+        Returns:
+            dict: Harga untuk setiap simbol di setiap exchange
+        """
+        prices = {}
+        for exchange in self.exchanges:
+            exchange_name = exchange.__class__.__name__.lower()
+            prices[exchange_name] = {}
+            
+            for symbol in self.symbols:
+                try:
+                    price = exchange.fetch_ticker(symbol)
+                    if price is None or not isinstance(price, (int, float)):
+                        logger.warning(f"⚠️ Harga {symbol} dari {exchange_name} tidak valid, menggunakan default 0.0")
+                        price = 0.0
+                    prices[exchange_name][symbol] = price
+                    logger.debug(f"📊 {exchange_name.upper()} {symbol}: {price}")
+                except Exception as e:
+                    logger.error(f"❌ Gagal ambil harga {symbol} dari {exchange_name}: {e}")
+                    prices[exchange_name][symbol] = 0.0
+                    
+        return prices
+		
+3. data/
+	- logs/
+		- bot.log
+4. exchanges/
+	- __pycache__/
+	- binance.py:
+	import os
+import hmac
+import time
+import hashlib
+import requests
+from urllib.parse import urlencode
+from .exchange_interface import Exchange
+from utils.logger import logger
+
+class Binance(Exchange):
+    BASE_URL = "https://api.binance.com"
+
+    def __init__(self):
+        self.api_key = os.getenv("BINANCE_API_KEY")
+        self.api_secret = os.getenv("BINANCE_SECRET_KEY")
+        if not self.api_key or not self.api_secret:
+            raise ValueError("Binance API key dan secret wajib di-set di environment variables")
+        self.session = requests.Session()
+        self.session.headers.update({
+            "X-MBX-APIKEY": self.api_key,
+            "User-Agent": "arbitrage-bot/1.0"
+        })
+        logger.info("✅ Binance client initialized successfully")
+
+    def get_base_currency(self) -> str:
+        return "USDT"
+
+    def _get(self, path, params=None, signed=False):
+        url = f"{self.BASE_URL}{path}"
+        if params is None:
+            params = {}
+
+        if signed:
+            params['timestamp'] = int(time.time() * 1000)
+            query_string = urlencode(params)
+            signature = hmac.new(
+                self.api_secret.encode('utf-8'),
+                query_string.encode('utf-8'),
+                hashlib.sha256
+            ).hexdigest()
+            params['signature'] = signature
+        else:
+            query_string = urlencode(params)
+
+        full_url = f"{url}?{urlencode(params)}" if params else url
+
+        try:
+            resp = self.session.get(full_url, timeout=10)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            logger.error(f"🚨 Binance API GET {full_url} failed: {e}")
+            return None
+
+    def fetch_ticker(self, symbol: str, usd_to_idr: float = 1.0) -> float:
+        """
+        Mengambil harga terakhir dari Binance dan kembalikan dalam USD.
+        """
+        try:
+            symbol_pair = symbol.upper() + "USDT"
+            response = self.session.get(f"{self.BASE_URL}/api/v3/ticker/price", params={"symbol": symbol_pair}, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            return float(data["price"])
+        except Exception as e:
+            logger.error(f"🚨 Gagal fetch ticker Binance {symbol}: {e}")
+            return 0.0
+
+    def fetch_balance(self) -> dict:
+        try:
+            data = self._get("/api/v3/account", signed=True)
+            if not data or "balances" not in data:
+                logger.error("🚨 Gagal fetch balance Binance: data tidak valid")
+                return {}
+            balances = {}
+            for item in data["balances"]:
+                asset = item["asset"]
+                free = float(item["free"])
+                locked = float(item["locked"])
+                balances[asset] = {"free": free, "locked": locked}
+            return balances
+        except Exception as e:
+            logger.error(f"🚨 Error fetch balance Binance: {e}")
+            return {}
+
+    def transfer_coin(
+        self, 
+        symbol: str, 
+        amount: float, 
+        address: str, 
+        tag: str = None,
+        network: str = None
+    ) -> bool:
+        path = "/wapi/v3/withdraw.html"
+        params = {
+            "asset": symbol.upper(),
+            "address": address,
+            "amount": amount,
+            "timestamp": int(time.time() * 1000),
+            "recvWindow": 60000,
+        }
+        if tag:
+            params["addressTag"] = tag
+        if network:
+            params["network"] = network
+
+        query_string = urlencode(params)
+        signature = hmac.new(
+            self.api_secret.encode(),
+            query_string.encode(),
+            hashlib.sha256
+        ).hexdigest()
+        params["signature"] = signature
+
+        full_url = f"{self.BASE_URL}{path}?{urlencode(params)}"
+
+        try:
+            resp = self.session.post(full_url, timeout=20)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("success") == True or data.get("success") == "true":
+                logger.info(f"✅ Withdrawal Binance {amount} {symbol} to {address} sukses")
+                return True
+            else:
+                logger.error(f"🚨 Withdrawal Binance gagal: {data}")
+                return False
+        except Exception as e:
+            logger.error(f"🚨 Withdrawal Binance error: {e}")
+            return False
+			
+	- indodax.py:
+	import os
+import time
+import hashlib
+import hmac
+import requests
+from .exchange_interface import Exchange
+from utils.logger import logger
+
+class Indodax(Exchange):
+    BASE_URL = "https://indodax.com/api"
+    TAPI_URL = "https://indodax.com/tapi"
+
+    def __init__(self):
+        self.api_key = os.getenv("INDODAX_API_KEY")
+        self.secret_key = os.getenv("INDODAX_SECRET_KEY")
+        if not self.api_key or not self.secret_key:
+            raise ValueError("Indodax API key dan secret wajib di-set di environment variables")
+        self.session = requests.Session()
+        logger.info("✅ Indodax client initialized successfully")
+
+    def get_name(self) -> str:
+        return "indodax"
+
+    def get_base_currency(self) -> str:
+        return "IDR"
+
+    def _generate_signature(self, params: dict) -> str:
+        """Generate HMAC SHA512 signature for private API."""
+        query_string = '&'.join([f"{key}={params[key]}" for key in sorted(params)])
+        return hmac.new(
+            self.secret_key.encode('utf-8'),
+            query_string.encode('utf-8'),
+            hashlib.sha512
+        ).hexdigest()
+
+    def fetch_balance(self) -> dict:
+        """Fetch balance using /tapi with method=getInfo"""
+        params = {
+            'method': 'getInfo',
+            'timestamp': int(time.time() * 1000),
+        }
+        headers = {
+            'Key': self.api_key,
+            'Sign': self._generate_signature(params),
+        }
+
+        try:
+            response = self.session.post(self.TAPI_URL, data=params, headers=headers, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            if data.get('success') == 1 and 'return' in data:
+                return data['return']['balance']
+            else:
+                logger.error(f"🚨 Gagal fetch balance Indodax: {data}")
+                return {}
+        except Exception as e:
+            logger.error(f"🚨 Error fetch balance Indodax: {e}")
+            return {}
+
+    def fetch_ticker(self, symbol: str, usd_to_idr: float = 1.0) -> float:
+        """
+        Ambil harga terbaru dari Indodax, konversi ke USD.
+        """
+        pair = symbol.lower() + "_idr"
+        try:
+            response = self.session.get(f"{self.BASE_URL}/tickers", timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            if "tickers" in data and pair in data["tickers"]:
+                return float(data["tickers"][pair]["last"]) / usd_to_idr
+            else:
+                logger.error(f"🚨 Pair {pair} tidak ditemukan di tickers")
+                return 0.0
+        except Exception as e:
+            logger.error(f"🚨 Gagal fetch ticker Indodax {pair}: {e}")
+            return 0.0
+
+    def transfer_coin(
+        self, 
+        symbol: str, 
+        amount: float, 
+        address: str, 
+        tag: str = None, 
+        network: str = None
+    ) -> bool:
+        """
+        Kirim koin dari akun Indodax ke alamat eksternal
+        """
+        params = {
+            'method': 'withdrawCoin',
+            'timestamp': int(time.time() * 1000),
+            'currency': symbol.upper(),
+            'withdraw_address': address,
+            'withdraw_amount': amount
+        }
+        
+        if tag:
+            params['withdraw_memo'] = tag
+        
+        signature = self._generate_signature(params)
+        headers = {'Key': self.api_key, 'Sign': signature}
+        
+        try:
+            response = self.session.post(
+                self.TAPI_URL, 
+                data=params, 
+                headers=headers, 
+                timeout=20
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            if data.get('success') == 1:
+                logger.info(f"✅ Withdrawal Indodax {amount} {symbol} sukses ke {address}")
+                return True
+            else:
+                logger.error(f"🚨 Withdrawal Indodax gagal: {data}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"🚨 Withdrawal Indodax error: {e}")
+            return False
+
+
+	- kucoin.py:
+	import os
+import hmac
+import base64
+import hashlib
+import time
+import requests
+from exchanges.exchange_interface import Exchange
+from utils.logger import logger
+
+class KuCoin(Exchange):
+    BASE_URL = "https://api.kucoin.com"
+    
+    def __init__(self):
+        self.api_key = os.getenv("KUCOIN_API_KEY")
+        self.api_secret = os.getenv("KUCOIN_API_SECRET")
+        self.api_passphrase = os.getenv("KUCOIN_API_PASSPHRASE")
+        if not all([self.api_key, self.api_secret, self.api_passphrase]):
+            raise ValueError("KuCoin API key, secret, dan passphrase wajib di-set di environment variables")
+        self.session = requests.Session()
+        logger.info("✅ KuCoin client initialized successfully")
+
+    def get_base_currency(self) -> str:
+        return "USDT"
+
+    def _generate_signature(self, endpoint: str, method: str, params: dict = None, body: str = "") -> dict:
+        now = str(int(time.time() * 1000))  # Timestamp dalam milidetik
+        
+        # Bangun string_to_sign
+        str_to_sign = now + method.upper() + endpoint
+        
+        if params:
+            sorted_params = sorted(params.items())
+            query_string = "&".join([f"{k}={v}" for k, v in sorted_params])
+            str_to_sign += f"?{query_string}"
+        
+        if body:
+            str_to_sign += body
+
+        # ✅ Gunakan secret_bytes tanpa decode ulang
+        secret_bytes = base64.b64decode(self.api_secret)
+        
+        # Buat signature
+        signature = base64.b64encode(
+            hmac.new(
+                secret_bytes,
+                str_to_sign.encode('utf-8'),
+                hashlib.sha256
+            ).digest()
+        ).decode()
+
+        # ✅ Encode passphrase
+        passphrase = base64.b64encode(
+            hmac.new(
+                secret_bytes,
+                self.api_passphrase.encode('utf-8'),
+                hashlib.sha256
+            ).digest()
+        ).decode()
+
+        return {
+            "KC-API-KEY": self.api_key,
+            "KC-API-SIGN": signature,
+            "KC-API-TIMESTAMP": now,
+            "KC-API-PASSPHRASE": passphrase,
+            "KC-API-KEY-VERSION": "2",
+            "Content-Type": "application/json"
+        }
+
+    def fetch_ticker(self, symbol: str, usd_to_idr: float = 1.0) -> float:
+        """
+        Ambil harga terbaru dari KuCoin
+        Parameter `usd_to_idr` ditambahkan untuk kompatibilitas dengan Indodax
+        """
+        endpoint = f"/api/v1/market/orderbook/level1?symbol={symbol}-USDT"
+        headers = self._generate_signature(endpoint, "GET")
+        
+        try:
+            response = self.session.get(
+                f"{self.BASE_URL}{endpoint}", 
+                headers=headers,
+                timeout=10
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            if data.get("code") == "200000" and "data" in data:
+                return float(data["data"]["price"])
+            else:
+                logger.error(f"🚨 Ticker price KuCoin {symbol} tidak ditemukan: {data}")
+                return 0.0
+                
+        except Exception as e:
+            logger.error(f"🚨 Gagal fetch ticker KuCoin {symbol}: {e}")
+            return 0.0
+
+    def fetch_balance(self) -> dict:
+        """
+        Ambil saldo akun KuCoin
+        """
+        endpoint = "/api/v1/accounts"
+        headers = self._generate_signature(endpoint, "GET")
+
+        try:
+            response = self.session.get(
+                f"{self.BASE_URL}{endpoint}",
+                headers=headers,
+                timeout=10
+            )
+            response.raise_for_status()
+            
+            # Pastikan respons adalah JSON
+            try:
+                data = response.json()
+            except requests.exceptions.JSONDecodeError:
+                logger.error("🚨 Respons bukan JSON")
+                return {}
+                
+            if data.get("code") == "200000":
+                balances = {}
+                for item in data["data"]:
+                    if item["type"] == "trade":
+                        currency = item["currency"]
+                        free = float(item["available"])
+                        locked = float(item["holds"])
+                        balances[currency] = {"free": free, "locked": locked}
+                return balances
+            else:
+                logger.error(f"🚨 Gagal fetch balance KuCoin: {data}")
+                return {}
+        except Exception as e:
+            logger.error(f"🚨 Error fetch balance KuCoin: {e}")
+            return {}
+
+    def transfer_coin(
+        self, 
+        symbol: str, 
+        amount: float, 
+        address: str, 
+        tag: str = None,
+        network: str = None
+    ) -> bool:
+        endpoint = "/api/v2/withdrawals"
+        body = {
+            "currency": symbol.upper(),
+            "address": address,
+            "amount": amount,
+            "chain": network or self._get_network(symbol)
+        }
+        if tag:
+            body["memo"] = tag
+        headers = self._generate_signature(endpoint, "POST", body=body)
+        try:
+            response = self.session.post(f"{self.BASE_URL}{endpoint}", json=body, headers=headers, timeout=20)
+            response.raise_for_status()
+            data = response.json()
+            if data.get("code") == "200000":
+                logger.info(f"✅ Withdrawal KuCoin {amount} {symbol.upper()} to {address} sukses")
+                return True
+            else:
+                logger.error(f"🚨 Withdrawal KuCoin gagal: {data}")
+                return False
+        except Exception as e:
+            logger.error(f"🚨 Withdrawal KuCoin error: {e}")
+            return False
+
+    def _get_network(self, symbol: str) -> str:
+        networks = {
+            "BTC": "BTC",
+            "ETH": "ERC20",
+            "BNB": "BEP20",
+            "XRP": "XRP",
+            "USDT": "ERC20",
+            "SHIB": "ERC20"
+        }
+        return networks.get(symbol, "ERC20")
+		
+	- exchange_interface.py:
+	from abc import ABC, abstractmethod
+from typing import Optional, Dict, Any
+
+class Exchange(ABC):
+    @abstractmethod
+    def get_base_currency(self) -> str:
+        """Dapatkan mata uang dasar exchange (contoh: 'USDT', 'IDR')"""
+        pass
+
+    @abstractmethod
+    def fetch_ticker(self, symbol: str) -> float:
+        """Ambil harga koin dalam mata uang dasar exchange"""
+        pass
+
+    @abstractmethod
+    def fetch_balance(self) -> Dict[str, Dict[str, float]]:
+        """Ambil seluruh saldo dalam format {asset: {'free': float, 'locked': float}}"""
+        pass
+
+    @abstractmethod
+    def transfer_coin(
+        self, 
+        symbol: str, 
+        amount: float, 
+        address: str, 
+        tag: Optional[str] = None,
+        network: Optional[str] = None
+    ) -> bool:
+        """Transfer koin ke alamat tertentu"""
+        pass
+		
+5. src/
+	- __pycache__/
+	- data/
+		- logs/
+			- bot.log
+	- arbitrage_logic.py:
+	# src/arbitrage_logic.py
+import asyncio
+import websockets
+import json
+import os
+from exchanges.binance import Binance
+from exchanges.indodax import Indodax
+from utils.helpers import (
+    calculate_net_profit,
+    calculate_trade_amount,
+    check_balance_on_exchange,
+    get_usd_to_idr_rate
+)
+from config.settings import (
+    MIN_PROFIT_THRESHOLD_USD,
+    MIN_PROFIT_THRESHOLD_PERCENT
+)
+from utils.logger import logger
+
+# Muat daftar koin dari .env
+SUPPORTED_SYMBOLS = os.getenv('SUPPORTED_SYMBOLS', 'BTC,XRP,BNB').split(',')
+
+# Inisialisasi harga terakhir
+latest_prices = {
+    'binance': {},
+    'indodax': {}
+}
+
+# Inisialisasi exchange
+binance_api = Binance()
+indodax_api = Indodax()
+
+async def listen_binance_websocket():
+    """
+    WebSocket untuk Binance dengan dukungan multi-coin
+    Format: BTCUSDT@trade, XRPUSDT@trade, dll.
+    """
+    symbols = [f"{s}USDT" for s in SUPPORTED_SYMBOLS]
+    streams = '/'.join([f"{s}@trade" for s in symbols])
+    uri = f"wss://stream.binance.com:9443/ws/{streams}"
+
+    while True:
+        try:
+            async with websockets.connect(uri, ping_interval=20, ping_timeout=20) as websocket:
+                logger.info("🟢 WebSocket Binance terhubung untuk multi-coin")
+                while True:
+                    msg = await websocket.recv()
+                    data = json.loads(msg)
+                    symbol = data['s'].replace('USDT', '')  # BTCUSDT → BTC
+                    
+                    if symbol in SUPPORTED_SYMBOLS:
+                        latest_prices['binance'][symbol] = float(data['p'])
+                        logger.debug(f"📈 Binance {symbol}/USDT: ${data['p']}")
+        except Exception as e:
+            logger.error(f"🔴 WebSocket Binance terputus: {e}. Reconnecting...")
+            await asyncio.sleep(5)
+
+def fetch_indodax_price():
+    """
+    Polling harga Indodax untuk semua simbol yang didukung
+    Jika pasar tidak tersedia, log sebagai peringatan
+    """
+    for symbol in SUPPORTED_SYMBOLS:
+        try:
+            ticker = indodax_api.fetch_ticker(symbol)
+            if ticker:
+                latest_prices['indodax'][symbol] = ticker
+                logger.debug(f"📉 Indodax {symbol}/IDR: Rp{ticker:,}")
+            else:
+                logger.warning(f"🚫 Pasangan {symbol}/IDR tidak ditemukan di Indodax")
+                latest_prices['indodax'][symbol] = None
+        except Exception as e:
+            logger.error(f"🚨 Gagal ambil harga {symbol} dari Indodax: {e}")
+            latest_prices['indodax'][symbol] = None
+
+def check_arbitrage_opportunity():
+    opportunities = []
+    for symbol in SUPPORTED_SYMBOLS:
+        price_binance = latest_prices['binance'].get(symbol)
+        price_indodax = latest_prices['indodax'].get(symbol)
+        if not price_binance or not price_indodax:
+            logger.warning(f"⏳ Tunggu harga {symbol} dari Binance dan Indodax...")
+            continue
+        
+        usd_to_idr = get_usd_to_idr_rate()
+        price_indodax_usd = price_indodax / usd_to_idr
+        spread = abs(price_binance - price_indodax_usd)
+        fee_total = (price_binance * 0.001) + (price_indodax_usd * 0.001)
+        profit = spread - fee_total
+        profit_percent = (profit / price_binance) * 100 if price_binance > 0 else 0
+
+        if profit > MIN_PROFIT_THRESHOLD_USD and profit_percent > MIN_PROFIT_THRESHOLD_PERCENT:
+            opportunities.append({
+                'symbol': symbol,
+                'buy_exchange': 'Binance' if price_binance < price_indodax_usd else 'Indodax',
+                'sell_exchange': 'Indodax' if price_binance < price_indodax_usd else 'Binance',
+                'buy_price': round(min(price_binance, price_indodax_usd), 6),
+                'sell_price': round(max(price_binance, price_indodax_usd), 6),
+                'profit': round(profit, 6),
+                'profit_percent': round(profit_percent, 2),
+                'usd_to_idr': usd_to_idr,
+                'amount': calculate_trade_amount(
+                    symbol=symbol,
+                    buy_exchange=Binance() if price_binance < price_indodax_usd else Indodax(),
+                    sell_exchange=Indodax() if price_binance < price_indodax_usd else Binance(),
+                    buy_price=min(price_binance, price_indodax_usd),
+                    sell_price=max(price_binance, price_indodax_usd),
+                    usd_to_idr=usd_to_idr
+                ) or 0.001
+            })
+        else:
+            logger.warning(f"📉 {symbol} tidak layak: Spread: ${profit:.6f} ({profit_percent:.2f}%) < Threshold")
+    
+    return opportunities
+
+async def run_bot():
+    """
+    Fungsi utama bot arbitrase
+    """
+    logger.info("🚀 Bot arbitrase crypto dimulai...")
+    usd_to_idr = get_usd_to_idr_rate()
+    logger.info(f"💱 Kurs USD/IDR: {usd_to_idr}")
+
+    # Jalankan WebSocket Binance di latar belakang
+    asyncio.create_task(listen_binance_websocket())
+
+    while True:
+        try:
+            # Perbarui harga Indodax
+            fetch_indodax_price()
+            
+            # Cek peluang arbitrase
+            opportunities = check_arbitrage_opportunity(usd_to_idr)
+            
+            # Eksekusi peluang arbitrase
+            if opportunities:
+                logger.info(f"✅ Menemukan {len(opportunities)} peluang arbitrase")
+                for opportunity in opportunities:
+                    logger.info(f"🚀 Mengeksekusi arbitrase {opportunity['symbol']}")
+                    # Simulasi eksekusi
+                    logger.info(f"📊 Hasil: Profit Bersih ${opportunity['net_profit']:.6f} ({opportunity['net_profit_percent']}%)")
+            else:
+                logger.info("🔍 Tidak ada peluang arbitrase saat ini")
+                
+        except Exception as e:
+            logger.error(f"🚨 Kesalahan dalam siklus utama: {e}")
+        
+        # Tunggu sebelum cek ulang
+        await asyncio.sleep(5)
+
+if __name__ == "__main__":
+    asyncio.run(run_bot())
+	
+	- exchanges.py:
+	# src/exchanges.py
+import ccxt
+import os
+from dotenv import load_dotenv
+
+# Muat variabel lingkungan dari .env
+load_dotenv()
+
+# Daftar koin yang didukung (dari .env)
+SUPPORTED_SYMBOLS = os.getenv('SUPPORTED_SYMBOLS', 'BTC,ETH,XRP,SHIB,BNB').split(',')
+logger = None  # Akan diinisialisasi dari setup_logger()
+
+def setup_logger():
+    """Setup logger dasar untuk modul ini"""
+    import logging
+    logging.basicConfig(
+        format="[%(levelname)s] %(message)s",
+        level=logging.INFO
+    )
+    return logging.getLogger(__name__)
+
+def validate_api_keys(exchange_name):
+    """Validasi API key tersedia di .env"""
+    api_key = os.getenv(f"{exchange_name}_API_KEY")
+    secret_key = os.getenv(f"{exchange_name}_SECRET_KEY")
+    
+    if not api_key or not secret_key:
+        raise ValueError(f"🚫 {exchange_name} API key atau secret key tidak ditemukan di .env")
+    
+    return api_key, secret_key
+
+def configure_binance():
+    """Konfigurasi exchange Binance"""
+    try:
+        api_key, secret_key = validate_api_keys("BINANCE")
+        
+        binance = ccxt.binance({
+            'apiKey': api_key,
+            'secret': secret_key,
+            'enableRateLimit': True,
+            'options': {
+                'defaultType': 'spot',
+                'fetchCurrenciesFromEndpoint': False,
+                'fetchMarketsFromEndpoint': False,
+            },
+            'urls': {
+                'api': {
+                    'public': 'https://api.binance.com/api/v3 ',
+                    'private': 'https://api.binance.com/api/v3 '
+                }
+            }
+        })
+        binance.load_markets()
+        return binance
+    except Exception as e:
+        logger.error(f"🚨 Gagal konfigurasi Binance: {e}")
+        raise
+
+def configure_indodax():
+    """Konfigurasi exchange Indodax"""
+    try:
+        api_key, secret_key = validate_api_keys("INDODAX")
+        
+        indodax = ccxt.indodax({
+            'apiKey': api_key,
+            'secret': secret_key,
+            'enableRateLimit': True
+        })
+        indodax.load_markets()
+        return indodax
+    except Exception as e:
+        logger.error(f"🚨 Gagal konfigurasi Indodax: {e}")
+        raise
+
+def get_exchange_instance(exchange_name):
+    """Fungsi factory untuk mendapatkan instance exchange berdasarkan nama"""
+    if exchange_name == 'Binance':
+        return configure_binance()
+    elif exchange_name == 'Indodax':
+        return configure_indodax()
+    else:
+        raise ValueError(f"⚠️ Exchange '{exchange_name}' tidak didukung")
+
+# Inisialisasi logger
+logger = setup_logger()
+
+# Inisialisasi exchange
+try:
+    # Konfigurasi Binance
+    binance = configure_binance()
+    
+    # Konfigurasi Indodax
+    indodax = configure_indodax()
+    
+    logger.info(f"✅ Exchange berhasil dikonfigurasi untuk: {', '.join(SUPPORTED_SYMBOLS)}")
+except Exception as e:
+    logger.critical(f"🛑 Bot gagal diinisialisasi: {e}")
+    raise
+	
+	- main.py
+	- utils.py:
+	# src/utils.py
+import logging
+import os
+
+def setup_logger():
+    """
+    Setup logger untuk menyimpan aktivitas bot ke file
+    """
+    log_dir = "data/logs"
+    os.makedirs(log_dir, exist_ok=True)
+    logging.basicConfig(
+        filename=f"{log_dir}/bot.log",
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s"
+    )
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    formatter = logging.Formatter("[%(levelname)s] %(message)s")
+    console.setFormatter(formatter)
+    logging.getLogger().addHandler(console)
+    return logging.getLogger(__name__)
+	
+6. strategies/
+	- __pycache__/
+	- cross_exchange.py:
+	# strategies/cross_exchange.py
+from utils.helpers import calculate_net_profit, check_balance_on_exchange, calculate_trade_amount
+from config.settings import MIN_PROFIT_THRESHOLD_USD, MIN_PROFIT_THRESHOLD_PERCENT
+from utils.logger import logger
+
+def check_arbitrage_opportunity(prices, usd_to_idr, exchanges):
+    """
+    Cek peluang arbitrase antar exchange dan tambahkan info saldo akun
+    Args:
+        prices: Dict harga dari semua exchange
+        usd_to_idr: Kurs USD ke IDR
+        exchanges: Daftar instance exchange
+    Returns:
+        list: Daftar peluang arbitrase dengan detail saldo
+    """
+    opportunities = []
+    
+    # Loop melalui semua simbol yang didukung
+    for symbol in prices.get('binance', {}):  # Ganti dengan exchange utama
+        price_data = {}
+        
+        # Kumpulkan harga dari semua exchange
+        for exchange in exchanges:
+            ex_name = exchange.__class__.__name__.lower()
+            if symbol in prices[ex_name]:
+                base_currency = exchange.get_base_currency()
+                price = prices[ex_name][symbol]
+                
+                # Konversi ke USD jika perlu
+                if base_currency == "IDR":
+                    price = price / usd_to_idr
+                
+                price_data[ex_name] = {
+                    'price': price,
+                    'currency': base_currency,
+                    'raw_price': prices[ex_name][symbol]
+                }
+        
+        # Cari peluang arbitrase
+        if len(price_data) >= 2:
+            sorted_prices = sorted(
+                [(ex, data['price']) for ex, data in price_data.items()],
+                key=lambda x: x[1]
+            )
+            
+            buy_exchange, buy_price = sorted_prices[0]
+            sell_exchange, sell_price = sorted_prices[-1]
+            
+            if buy_price < sell_price:
+                # Ambil instance exchange
+                buy_ex = next(ex for ex in exchanges if ex.__class__.__name__.lower() == buy_exchange)
+                sell_ex = next(ex for ex in exchanges if ex.__class__.__name__.lower() == sell_exchange)
+                
+                # Hitung jumlah transaksi yang mungkin
+                trade_amount = calculate_trade_amount(
+                    symbol=symbol,
+                    buy_exchange=buy_ex,
+                    sell_exchange=sell_ex,
+                    buy_price=buy_price,
+                    sell_price=sell_price,
+                    usd_to_idr=usd_to_idr
+                )
+                
+                # Cek saldo di exchange pembelian (fiat)
+                buy_base_currency = buy_ex.get_base_currency()
+                buy_balance = buy_ex.fetch_balance().get(buy_base_currency, {}).get('free', 0)
+                buy_needed = buy_price * trade_amount if buy_base_currency != "IDR" else (buy_price * trade_amount * usd_to_idr)
+                
+                # Cek saldo di exchange penjualan (koin)
+                sell_balance = sell_ex.fetch_balance().get(symbol, {}).get('free', 0)
+                sell_needed = trade_amount
+                
+                # Format log yang lebih informatif
+                opportunity_details = f"""
+                ┌────────────────────────────────────────────────────┐
+                │ 📈 Peluang Arbitrase: {symbol}                    │
+                ├────────────────────────────────────────────────────┤
+                │ Pembelian: {buy_exchange.capitalize()}           │
+                │ Harga Beli: ${buy_price:.6f}                     │
+                │ Saldo Tersedia: {buy_balance} {buy_base_currency}│
+                │ Minimum Dibutuhkan: {buy_needed:.2f} {buy_base_currency}│
+                ├────────────────────────────────────────────────────┤
+                │ Penjualan: {sell_exchange.capitalize()}          │
+                │ Harga Jual: ${sell_price:.6f}                    │
+                │ Saldo Tersedia: {sell_balance} {symbol}          │
+                │ Minimum Dibutuhkan: {sell_needed:.6f} {symbol}   │
+                ├────────────────────────────────────────────────────┤
+                │ Simulasi Biaya & Profit:                         │
+                │   - Trading Buy: ${buy_price * trade_amount * 0.001:.6f}│
+                │   - Trading Sell: ${sell_price * trade_amount * 0.001:.6f}│
+                │   - Transfer Koin: ${TRANSFER_FEE.get(symbol, 0):.6f}│
+                │   - Transfer Fiat: ${TRANSFER_FEE_IDR_TO_USDT / usd_to_idr:.6f}│
+                ├────────────────────────────────────────────────────┤
+                │ Profit Bersih: ${calculate_net_profit(...)['net_profit']:.6f}│
+                │ Status: {"✅ Layak" if trade_amount else "❌ Tidak Layak (Saldo Tidak Cukup)"}│
+                └────────────────────────────────────────────────────┘
+                """
+                
+                logger.info(opportunity_details)
+                
+                # Tambahkan ke daftar peluang jika layak
+                if trade_amount:
+                    opportunities.append({
+                        'symbol': symbol,
+                        'buy_exchange': buy_exchange.capitalize(),
+                        'sell_exchange': sell_exchange.capitalize(),
+                        'buy_price': buy_price,
+                        'sell_price': sell_price,
+                        'amount': trade_amount,
+                        'usd_to_idr': usd_to_idr
+                    })
+                    
+    return opportunities
+	
+	- transfer_only.py
+	from utils.helpers import calculate_net_profit, calculate_trade_amount, convert_to_usd, get_required_amount_for_profit
+from config.settings import MIN_PROFIT_THRESHOLD_PERCENT, MIN_PROFIT_THRESHOLD_USD
+from utils.logger import logger
+from tabulate import tabulate
+import math
+
+def check_transfer_opportunity(prices, usd_to_idr, *exchanges):
+    """
+    Cek peluang arbitrase antar exchange
+    Args:
+        prices: Dict harga dari semua exchange
+        usd_to_idr: Kurs USD ke IDR
+        *exchanges: Daftar exchange aktif (Binance, Indodax, KuCoin)
+    Returns:
+        list: Daftar peluang arbitrase
+    """
+    opportunities = []
+    
+    for symbol in prices.get('binance', {}).keys():
+        price_data = {}
+        
+        # Kumpulkan harga dari semua exchange
+        for ex in exchanges:
+            ex_name = ex.__class__.__name__.lower()
+            raw_price = prices[ex_name].get(symbol)
+            
+            if raw_price <= 0:
+                logger.warning(f"⚠️ Harga {symbol} di {ex_name} tidak valid: {raw_price}")
+                continue
+            
+            base_currency = ex.get_base_currency()  # ✅ Dipanggil pada instance exchange
+            # Konversi IDR ke USD jika diperlukan
+            if base_currency == "IDR":
+                converted_price = raw_price / usd_to_idr
+                price_data[ex_name] = {
+                    'price': converted_price,
+                    'currency': base_currency,
+                    'raw_price': raw_price
+                }
+            else:
+                price_data[ex_name] = {
+                    'price': raw_price,
+                    'currency': base_currency,
+                    'raw_price': raw_price
+                }
+        
+        # Pastikan ada setidaknya 2 exchange dengan harga valid
+        if len(price_data) >= 2:
+            # Urutkan berdasarkan harga
+            sorted_prices = sorted(price_data.items(), key=lambda x: x[1]['price'])
+            buy_ex_name, buy_data = sorted_prices[0]
+            sell_ex_name, sell_data = sorted_prices[-1]
+            
+            # Dapatkan instance exchange
+            buy_exchange = next(ex for ex in exchanges if ex.__class__.__name__.lower() == buy_ex_name.lower())
+            sell_exchange = next(ex for ex in exchanges if ex.__class__.__name__.lower() == sell_ex_name.lower())
+            
+            # Hitung jumlah koin minimum
+            trade_details = calculate_trade_amount(
+                symbol=symbol,
+                buy_exchange=buy_exchange,
+                sell_exchange=sell_exchange,
+                buy_price=buy_data['price'],
+                sell_price=sell_data['price'],
+                usd_to_idr=usd_to_idr
+            ) or {}
+            
+            # Buat opportunity
+            opportunity = {
+                'symbol': symbol,
+                'price_data': price_data,
+                'usd_to_idr': usd_to_idr,
+                'required_amount': trade_details.get('required_amount', 0),
+                'sell_balance': trade_details.get('sell_balance', 0),
+                'buy_fiat_balance': trade_details.get('buy_fiat_balance', 0)
+            }
+            opportunity.update(calculate_net_profit(opportunity))
+            opportunities.append(opportunity)
+    
+    return opportunities
+	
+	- triangular.py
+7. utils/
+	- __pycache__/
+	- helpers.py:
+	import os
+import json
+import requests
+import importlib
+from datetime import datetime
+from config.settings import (
+    MIN_TRADE_AMOUNTS,
+    TRANSFER_FEE,
+    MIN_PROFIT_THRESHOLD_USD,
+    MIN_PROFIT_THRESHOLD_PERCENT,
+    TRANSFER_FEE_IDR_TO_USDT
+)
+from utils.logger import logger
+
+logger.info("📥 Fungsi helpers berhasil dimuat")
+
+def get_usd_to_idr_rate():
+    if os.getenv("USD_TO_IDR_RATE"):
+        rate = float(os.getenv("USD_TO_IDR_RATE"))
+        logger.info(f"💱 Kurs dari .env: {rate}")
+        return rate
+    try:
+        response = requests.get("https://api.frankfurter.app/latest?from=USD&to=IDR", timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        if "rates" in data and "IDR" in data["rates"]:
+            idr_rate = data["rates"]["IDR"]
+            save_last_usd_to_idr_rate(idr_rate)
+            logger.info(f"💱 Kurs dari API: {idr_rate}")
+            return idr_rate
+        else:
+            raise ValueError("Kurs IDR tidak ditemukan dalam respons API")
+    except Exception as e:
+        fallback_rate = load_last_usd_to_idr_rate()
+        logger.warning(f"⚠️ Gagal ambil kurs dari API: {e}. Menggunakan kurs fallback: {fallback_rate}")
+        return fallback_rate
+
+def save_last_usd_to_idr_rate(rate):
+    """
+    Simpan kurs terakhir ke file
+    """
+    LAST_RATE_FILE = "data/last_rate.json"
+    try:
+        with open(LAST_RATE_FILE, "w") as f:
+            json.dump({"usd_to_idr": rate, "timestamp": str(datetime.now())}, f)
+    except Exception as e:
+        logger.error(f"🚨 Gagal simpan kurs: {e}")
+
+def load_last_usd_to_idr_rate():
+    """
+    Muat kurs dari file lokal
+    """
+    LAST_RATE_FILE = "data/last_rate.json"
+    try:
+        if os.path.exists(LAST_RATE_FILE):
+            with open(LAST_RATE_FILE, "r") as f:
+                data = json.load(f)
+                return float(data["usd_to_idr"])
+        else:
+            logger.info("📂 Tidak ada kurs sebelumnya, menggunakan kurs default 15000")
+            return 15000
+    except Exception as e:
+        logger.error(f"🚨 Gagal muat kurs dari file: {e}")
+        return 15000
+
+def get_wallet_address(exchange, symbol):
+    """
+    Ambil alamat wallet dari .env
+    Format: {EXCHANGE}_{SYMBOL}_WALLET=address[:network][:tag]
+    """
+    exchange_name = exchange.__class__.__name__.upper()
+    symbol_name = symbol.upper()
+    wallet_env_key = f"{exchange_name}_{symbol_name}_WALLET"
+    wallet_info = os.getenv(wallet_env_key)
+
+    if not wallet_info:
+        logger.warning(f"⚠️ Alamat wallet tidak ditemukan untuk {symbol_name} di {exchange_name}")
+        return {'address': None, 'network': None, 'destination_tag': None}
+
+    parts = wallet_info.split(':')
+    if exchange_name == "KUCOIN":
+        return {
+            'address': parts[0],
+            'network': parts[1] if len(parts) > 1 else None,
+            'destination_tag': parts[2] if len(parts) > 2 else None
+        }
+    else:
+        return {
+            'address': parts[0],
+            'destination_tag': parts[1] if len(parts) > 1 else None
+        }
+
+def calculate_net_profit(opportunity):
+    """
+    Hitung profit bersih dengan semua biaya diperhitungkan
+    Args:
+        opportunity: Dict data peluang arbitrase
+    Returns:
+        dict: Detail perhitungan profit
+    """
+    symbol = opportunity['symbol']
+    price_data = opportunity.get('price_data', {})
+    
+    if not price_data:
+        logger.error("🚨 price_data kosong, tidak bisa hitung profit")
+        return {}
+    
+    try:
+        # Tentukan exchange pembelian dan penjualan
+        buy_ex = next(ex for ex in price_data if price_data[ex]['price'] == min(p['price'] for p in price_data.values()))
+        sell_ex = next(ex for ex in price_data if price_data[ex]['price'] == max(p['price'] for p in price_data.values()))
+    except StopIteration:
+        logger.error("🚨 Tidak ditemukan exchange dengan harga valid")
+        return {}
+
+    buy_price = price_data[buy_ex]['price']
+    sell_price = price_data[sell_ex]['price']
+    usd_to_idr = opportunity['usd_to_idr']
+    
+    # Biaya transaksi
+    fee_buy = buy_price * 0.001
+    fee_sell = sell_price * 0.001
+    coin_transfer_fee = TRANSFER_FEE.get(symbol, 0)
+    fiat_transfer_fee_usd = TRANSFER_FEE_IDR_TO_USDT / usd_to_idr
+    
+    total_fee = fee_buy + fee_sell + coin_transfer_fee + fiat_transfer_fee_usd
+    gross_profit = sell_price - buy_price
+    net_profit = gross_profit - total_fee
+    net_profit_percent = (net_profit / buy_price) * 100 if buy_price > 0 else 0
+
+    # Format log detail
+    opportunity_details = f"""
+    ┌────────────────────────────────────────────────────┐
+    │ 📈 Peluang Arbitrase: {symbol}                  │
+    ├────────────────────────────────────────────────────┤
+    │ Pembelian: {buy_ex.capitalize()}               │
+    │ Harga Beli: ${buy_price:.6f}                  │
+    ├────────────────────────────────────────────────────┤
+    │ Penjualan: {sell_ex.capitalize()}              │
+    │ Harga Jual: ${sell_price:.6f}                │
+    ├────────────────────────────────────────────────────┤
+    │ Biaya Transaksi:                               │
+    │   - Trading Buy: ${fee_buy:.6f}              │
+    │   - Trading Sell: ${fee_sell:.6f}            │
+    │   - Transfer Koin: ${coin_transfer_fee:.6f}  │
+    │   - Transfer Fiat: ${fiat_transfer_fee_usd:.6f} │
+    ├────────────────────────────────────────────────────┤
+    │ Profit Kotor: ${gross_profit:.6f}             │
+    │ Profit Bersih: ${net_profit:.6f}              │
+    │ Persentase Profit: {net_profit_percent:.2f}% │
+    │ Status: {"✅ Layak" if net_profit > MIN_PROFIT_THRESHOLD_USD and net_profit_percent > MIN_PROFIT_THRESHOLD_PERCENT else "❌ Tidak Layak"} │
+    └────────────────────────────────────────────────────┘
+    """
+    logger.info(opportunity_details)
+    
+    return {
+        'buy_exchange': buy_ex.capitalize(),
+        'sell_exchange': sell_ex.capitalize(),
+        'buy_price': round(buy_price, 6),
+        'sell_price': round(sell_price, 6),
+        'gross_profit': round(gross_profit, 6),
+        'total_fee': round(total_fee, 6),
+        'net_profit': round(net_profit, 6),
+        'net_profit_percent': round(net_profit_percent, 2),
+        'is_executable': net_profit > MIN_PROFIT_THRESHOLD_USD and net_profit_percent > MIN_PROFIT_THRESHOLD_PERCENT,
+        'fee_details': {
+            'trading_buy': fee_buy,
+            'trading_sell': fee_sell,
+            'coin_transfer': coin_transfer_fee,
+            'fiat_transfer': fiat_transfer_fee_usd
+        }
+    }
+
+def get_required_amount_for_profit(symbol, buy_price, sell_price, usd_to_idr):
+    """
+    Hitung jumlah koin minimum untuk mencapai profit
+    """
+    spread = sell_price - buy_price
+    if spread <= 0:
+        return 0
+    
+    # Biaya tetap
+    fee_buy = buy_price * 0.001
+    fee_sell = sell_price * 0.001
+    coin_transfer_fee = TRANSFER_FEE.get(symbol, 0)
+    fiat_transfer_fee_usd = TRANSFER_FEE_IDR_TO_USDT / usd_to_idr
+    
+    total_fee = fee_buy + fee_sell + coin_transfer_fee + fiat_transfer_fee_usd
+    gross_profit = spread - total_fee
+    if gross_profit <= 0:
+        return 0
+    
+    # Hitung jumlah koin minimum
+    required_amount = MIN_PROFIT_THRESHOLD_USD / gross_profit
+    return max(required_amount, MIN_TRADE_AMOUNTS.get(symbol, 0.001))
+
+def calculate_trade_amount(symbol, buy_exchange, sell_exchange, buy_price, sell_price, usd_to_idr):
+    """
+    Hitung jumlah transaksi berdasarkan saldo nyata
+    """
+    try:
+        # Dapatkan saldo koin di exchange penjual
+        sell_balance = sell_exchange.fetch_balance().get(symbol, {}).get('free', 0)
+        
+        # Dapatkan saldo fiat di exchange pembeli
+        buy_base_currency = buy_exchange.get_base_currency()
+        buy_balance_data = buy_exchange.fetch_balance()
+        
+        if buy_base_currency in ['USDT', 'USD']:
+            buy_fiat_balance = buy_balance_data.get('USDT', {}).get('free', 0) + buy_balance_data.get('USD', {}).get('free', 0)
+            max_by_fiat = buy_fiat_balance / buy_price
+        else:
+            buy_fiat_balance = buy_balance_data.get('IDR', {}).get('free', 0)
+            buy_fiat_balance_usd = buy_fiat_balance / usd_to_idr
+            max_by_fiat = buy_fiat_balance_usd / buy_price
+        
+        # Batasi oleh saldo koin dan fiat
+        trade_amount = min(sell_balance, max_by_fiat)
+        min_amount = MIN_TRADE_AMOUNTS.get(symbol, 0.001)
+        
+        if trade_amount < min_amount:
+            logger.warning(f"⚠️ Volume terlalu kecil untuk {symbol}. Minimum: {min_amount} {symbol}.")
+            return None
+            
+        return trade_amount
+    except Exception as e:
+        logger.error(f"🚨 Error saat menghitung trade_amount untuk {symbol}: {e}")
+        return None
+    
+    except Exception as e:
+        logger.error(f"🚨 Error saat menghitung trade_amount untuk {symbol}: {e}")
+        return {
+            'trade_amount': None,
+            'required_amount': 0,
+            'sell_balance': 0,
+            'buy_fiat_balance': 0
+        }
+
+def get_active_exchanges():
+    """
+    Muat daftar exchange aktif dari .env
+    """
+    exchange_names = os.getenv("ACTIVE_EXCHANGES", "Binance,Indodax").split(",")
+    exchange_instances = []
+    for name in exchange_names:
+        name = name.strip()
+        if not name:
+            continue
+        try:
+            mod_name = name.lower()
+            module = importlib.import_module(f"exchanges.{mod_name}")
+            exchange_class = getattr(module, name)
+            exchange_instances.append(exchange_class())  # ✅ Instance exchange
+        except Exception as e:
+            logger.error(f"❌ Gagal inisialisasi exchange {name}: {e}")
+    return exchange_instances
+
+def get_supported_symbols():
+    """
+    Ambil daftar simbol yang didukung dari .env
+    """
+    symbols = os.getenv('SUPPORTED_SYMBOLS', 'BTC,XRP,BNB').split(',')
+    return [s.strip() for s in symbols]
+
+def convert_to_usd(price, currency, usd_to_idr):
+    """
+    Konversi harga ke USD
+    """
+    if currency in ['USDT', 'USD']:
+        return price
+    elif currency == 'IDR':
+        return price / usd_to_idr
+    else:
+        return price
+        
+def check_balance_on_exchange(exchange, symbol, amount, price):
+    """
+    Cek apakah exchange memiliki saldo yang cukup
+    """
+    try:
+        base_currency = exchange.get_base_currency()
+        balance_data = exchange.fetch_balance()
+        
+        if base_currency in ['USDT', 'USD']:
+            usd_balance = balance_data.get('USDT', {}).get('free', 0) + balance_data.get('USD', {}).get('free', 0)
+            usd_needed = amount * price
+            logger.debug(f"🔍 Saldo {exchange.__class__.__name__}: {usd_balance} USD | Dibutuhkan: {usd_needed} USD")
+            return usd_balance >= usd_needed
+        else:
+            idr_balance = balance_data.get('IDR', {}).get('free', 0)
+            idr_needed = amount * price
+            logger.debug(f"🔍 Saldo {exchange.__class__.__name__}: {idr_balance} IDR | Dibutuhkan: {idr_needed} IDR")
+            return idr_balance >= idr_needed
+    except Exception as e:
+        logger.error(f"🚨 Gagal cek saldo di exchange: {e}")
+        return False
+		
+	- logger.py:
+	# utils/logger.py
+import logging
+import os
+import sys
+from colorama import Fore, Style, init
+init(autoreset=True)
+
+def setup_logger():
+    logger = logging.getLogger("bitbot")
+    logger.setLevel(logging.INFO)
+    
+    # File handler
+    log_dir = "data/logs"
+    os.makedirs(log_dir, exist_ok=True)
+    file_handler = logging.FileHandler(f"{log_dir}/bot.log", encoding='utf-8')
+    file_formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
+    
+    # Console handler dengan warna
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    
+    class ColoredFormatter(logging.Formatter):
+        COLORS = {
+            logging.DEBUG: Fore.CYAN,
+            logging.INFO: Fore.GREEN,
+            logging.WARNING: Fore.YELLOW,
+            logging.ERROR: Fore.RED,
+            logging.CRITICAL: Fore.MAGENTA
+        }
+        def format(self, record):
+            color = self.COLORS.get(record.levelno, Style.RESET_ALL)
+            message = super().format(record)
+            return f"{color}{message}{Style.RESET_ALL}"
+    
+    console_formatter = ColoredFormatter("[%(levelname)s] %(message)s")
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+    
+    return logger
+
+logger = setup_logger()
+
+8. venv/
+9. main.py:
+import asyncio
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from utils.helpers import (
+    get_usd_to_idr_rate,
+    get_active_exchanges,
+    get_required_amount_for_profit,
+    get_supported_symbols
+)
+from core.transfer_executor import RealTradeExecutor
+from strategies.transfer_only import check_transfer_opportunity
+from utils.logger import logger
+from core.price_collector import PriceCollector
+from core.arbitrage_engine import ArbitrageEngine  # ✅ Tambahkan baris ini
+
+async def run_bot():
+    logger.info("🚀 Memulai bot arbitrase crypto...")
+    
+    # Muat exchange aktif
+    exchanges = get_active_exchanges()
+    logger.info(f"💱 Exchange aktif: {', '.join(ex.__class__.__name__ for ex in exchanges)}")
+    
+    # Inisialisasi komponen
+    price_collector = PriceCollector()
+    arbitrage_engine = ArbitrageEngine(
+        price_collector=price_collector,
+        exchanges=exchanges
+    )
+    
+    while True:
+        try:
+            # Jalankan deteksi arbitrase
+            opportunities = arbitrage_engine.run()
+            
+            if opportunities:
+                logger.info(f"✅ Ditemukan {len(opportunities)} peluang arbitrase")
+            else:
+                logger.info("🔍 Tidak ditemukan peluang arbitrase")
+                
+        except Exception as e:
+            logger.error(f"🚨 Kesalahan dalam siklus utama: {e}")
+            
+        # Tunggu sebelum iterasi berikutnya
+        await asyncio.sleep(60)
+
+if __name__ == "__main__":
+    asyncio.run(run_bot())
+
+.env:
+# .env
+INDODAX_API_KEY=xxx
+INDODAX_SECRET_KEY=xxx
+
+BINANCE_API_KEY=xxx
+BINANCE_SECRET_KEY=xxx
+
+KUCOIN_API_KEY=xxx
+KUCOIN_API_SECRET=xxx
+KUCOIN_API_PASSPHRASE=xxx
+
+BYBIT_API_KEY=xxx
+BYBIT_SECRET_KEY=xxx
+
+POLONIEX_API_KEY=xxx
+POLONIEX_SECRET_KEY=xxx
+
+# Alamat Wallet
+BINANCE_BTC_WALLET=0xba0ecd1d473ebb095ad7729d3f909be47138a08c
+BINANCE_BNB_WALLET=0xba0ecd1d473ebb095ad7729d3f909be47138a08c
+BINANCE_XRP_WALLET=0xba0ecd1d473ebb095ad7729d3f909be47138a08c
+BINANCE_SHIB_WALLET=0xba0ecd1d473ebb095ad7729d3f909be47138a08c
+BINANCE_USDT_WALLET=0xba0ecd1d473ebb095ad7729d3f909be47138a08c
+
+INDODAX_BTC_WALLET=1Hzzyw9uzrr1jHjH96JXYFGuhAJ8SY9Wx4
+INDODAX_BNB_WALLET=0x51609fb1e630d1a7bb5eb8693a9859428d20fb1c
+INDODAX_XRP_WALLET=rwWr7KUZ3ZFwzgaDGjKBysADByzxvohQ3C:2550401
+INDODAX_SHIB_WALLET=0x51609fb1e630d1a7bb5eb8693a9859428d20fb1c
+INDODAX_USDT_WALLET=0x51609fb1e630d1a7bb5eb8693a9859428d20fb1c
+
+KUCOIN_BTC_WALLET=3Mg5m7tUjV4SYNcDnWg8aTT1weu7bsjNiQ
+KUCOIN_BNB_WALLET=0x40cc4e4ec82a42d77b80f5d8df6319c40345827a
+KUCOIN_XRP_WALLET=rNFugeoj3ZN8Wv6xhuLegUBBPXKCyWLRkB:2096580954
+KUCOIN_SHIB_WALLET=0x40cc4e4ec82a42d77b80f5d8df6319c40345827a
+KUCOIN_USDT_WALLET=TJM1j2yKXGp8afAWZXSiCZQsDXhS48JbmB
+
+POLONIEX_BTC_WALLET=1JYEKEPuorKDiiuRjuWXLsEkdd4ZoMbPyZ
+POLONIEX_XRP_WALLET=rwJXYKC1VMzGYc6RHnhnbe38syj5EE34cS:2014477193
+POLONIEX_BNB_WALLET=0x7c5f7d30e1a779abeb2074b62a0a2971ba7dcdff
+POLONIEX_SHIB_WALLET=0x2a6091c5e6ca1fed0a58da8fdb00a421bb52858a
+POLONIEX_USDT_WALLET=0x7c5f7d30e1a779abeb2074b62a0a2971ba7dcdff
+
+
+# Biaya Transfer
+TRANSFER_FEE_IDR_TO_USDT=10000
+TRANSFER_FEE_BTC=0.000002
+TRANSFER_FEE_ETH=0.0005
+TRANSFER_FEE_BNB=0.001
+TRANSFER_FEE_XRP=0.1
+TRANSFER_FEE_SHIB=1000000
+
+# Threshold Profit
+MIN_PROFIT_THRESHOLD_USD=0.5
+MIN_PROFIT_THRESHOLD_PERCENT=0.01
+
+SUPPORTED_SYMBOLS=BTC,XRP,SHIB,BNB
+USD_TO_IDR_RATE=16179
+
+SIMULATION_MODE=False
+ACTIVE_EXCHANGES=Binance,Indodax,KuCoin
