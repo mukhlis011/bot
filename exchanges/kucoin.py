@@ -29,31 +29,30 @@ class KuCoin(Exchange):
         now = str(int(time.time() * 1000))
         str_to_sign = now + method.upper() + endpoint
         
+        # Handle query parameters
         if params:
             sorted_params = sorted(params.items())
             query_string = "&".join([f"{k}={v}" for k, v in sorted_params])
             str_to_sign += f"?{query_string}"
         
+        # Handle request body
         if body:
             str_to_sign += json.dumps(body, separators=(',', ':'), ensure_ascii=False)
         
-        # Decode secret
-        secret_decoded = base64.b64decode(self.api_secret)
+        logger.debug(f"String to sign: {str_to_sign}")
+        
+        # Create signature
         signature = base64.b64encode(
             hmac.new(
-                secret_decoded,
+                self.api_secret.encode('utf-8'),
                 str_to_sign.encode('utf-8'),
                 hashlib.sha256
             ).digest()
         ).decode()
         
-        # Encode passphrase
+        # Passphrase should be base64 encoded (not HMAC)
         passphrase = base64.b64encode(
-            hmac.new(
-                secret_decoded,
-                self.api_passphrase.encode('utf-8'),
-                hashlib.sha256
-            ).digest()
+            self.api_passphrase.encode('utf-8')
         ).decode()
         
         return {
@@ -68,7 +67,7 @@ class KuCoin(Exchange):
     def fetch_ticker(self, symbol):
         endpoint = "/api/v1/market/orderbook/level1"
         params = {"symbol": f"{symbol}-USDT"}
-        headers = self._generate_signature(endpoint, "GET", params)
+        headers = self._generate_signature(endpoint, "GET", params=params)
         
         try:
             response = self.session.get(
@@ -77,6 +76,14 @@ class KuCoin(Exchange):
                 headers=headers,
                 timeout=10
             )
+            
+            # Debug logging
+            logger.debug(f"KuCoin response: {response.status_code} {response.text}")
+            
+            if response.status_code == 401:
+                logger.error("❌ Autentikasi KuCoin gagal. Periksa API Key, Secret, dan Passphrase")
+                return 0.0
+            
             response.raise_for_status()
             data = response.json()
             

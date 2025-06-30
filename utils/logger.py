@@ -6,7 +6,7 @@ init(autoreset=True)
 
 def setup_logger():
     logger = logging.getLogger("bitbot")
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)  # Set default ke DEBUG
     
     # File handler
     log_dir = "data/logs"
@@ -21,7 +21,7 @@ def setup_logger():
     
     # Console handler dengan warna
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(logging.INFO)  # Console hanya tampilkan INFO ke atas
     
     class ColoredFormatter(logging.Formatter):
         COLORS = {
