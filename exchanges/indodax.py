@@ -34,10 +34,17 @@ class Indodax(Exchange):
     def fetch_ticker(self, symbol):
         pair = f"{symbol.lower()}_idr"
         try:
+            # PERBAIKAN: Gunakan endpoint yang benar
             response = self.session.get(f"{self.BASE_URL}/api/ticker/{pair}", timeout=10)
             response.raise_for_status()
             data = response.json()
-            return float(data['ticker']['last'])
+            
+            # PERBAIKAN: Pastikan struktur respons benar
+            if 'ticker' in data and 'last' in data['ticker']:
+                return float(data['ticker']['last'])
+            else:
+                logger.error(f"❌ Format respons tidak valid: {data}")
+                return 0.0
         except Exception as e:
             logger.error(f"❌ Gagal fetch ticker {pair}: {e}")
             return 0.0
