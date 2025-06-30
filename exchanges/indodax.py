@@ -32,13 +32,19 @@ class Indodax(Exchange):
         ).hexdigest()
 
     def fetch_ticker(self, symbol):
-        pair = f"{symbol.lower()}_idr"
+        # Format pair yang benar: symbol + "idr" (tanpa underscore)
+        pair = f"{symbol.lower()}idr"
+        
         try:
             response = self.session.get(f"{self.BASE_URL}/api/ticker/{pair}", timeout=10)
+            logger.debug(f"Indodax URL: {response.url}")
+            
+            # Debug: Tampilkan respons mentah
+            logger.debug(f"Indodax response: {response.status_code} {response.text}")
+            
             response.raise_for_status()
             data = response.json()
             
-            # Perbaikan: Pastikan struktur respons benar
             if 'ticker' in data and 'last' in data['ticker']:
                 return float(data['ticker']['last'])
             else:

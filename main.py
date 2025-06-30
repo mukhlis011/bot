@@ -16,9 +16,10 @@ from strategies.balance_rotator import BalanceRotator
 
 # Setup logger
 logger = setup_logger()
-logger.setLevel(logging.DEBUG)  # Set ke DEBUG untuk lebih banyak log
+logger.setLevel(logging.DEBUG)
 
-def sync_system_time():
+def check_time_sync():
+    """Cek sinkronisasi waktu dengan server NTP"""
     try:
         client = ntplib.NTPClient()
         response = client.request('pool.ntp.org')
@@ -26,29 +27,26 @@ def sync_system_time():
         ntp_time = response.tx_time
         time_diff = abs(ntp_time - current_time)
         
-        if time_diff > 30:  # Jika selisih waktu lebih dari 30 detik
+        if time_diff > 5:
             logger.warning(f"⚠️ Waktu sistem tidak sinkron! Selisih: {time_diff:.2f} detik")
-            logger.warning("Harap sinkronkan waktu sistem Anda")
+            logger.warning("Harap sinkronkan waktu sistem Anda dengan internet")
         else:
             logger.info(f"✅ Waktu sistem sinkron (selisih: {time_diff:.2f} detik)")
     except Exception as e:
-        logger.error(f"❌ Gagal sinkronisasi waktu: {e}")
+        logger.error(f"❌ Gagal cek sinkronisasi waktu: {e}")
 
 async def run_bot():
     logger.info("🚀 Memulai bot arbitrase crypto...")
     os.makedirs("data/logs", exist_ok=True)
     
-    # Sinkronisasi waktu sistem
-    sync_system_time()
+    # Cek sinkronisasi waktu
+    check_time_sync()
     
     try:
         # Muat exchange aktif
         exchanges = get_active_exchanges()
         exchange_names = [ex.__class__.__name__ for ex in exchanges]
         logger.info(f"💱 Exchange aktif: {', '.join(exchange_names)}")
-        
-        # Beri waktu untuk inisialisasi
-        await asyncio.sleep(2)
         
         # Inisialisasi komponen
         price_collector = PriceCollector(exchanges)
@@ -62,7 +60,7 @@ async def run_bot():
                 await balance_rotator.rotate_balances()
                 
                 # 2. Jalankan deteksi arbitrase
-                logger.debug("🔄 Mengumpulkan harga dari exchange...")
+                logger.debug("🔄 Mengumpulkan harga...")
                 opportunities = arbitrage_engine.run()
                 
                 if opportunities:

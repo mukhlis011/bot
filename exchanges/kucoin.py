@@ -50,10 +50,8 @@ class KuCoin(Exchange):
             ).digest()
         ).decode()
         
-        # Passphrase should be base64 encoded (not HMAC)
-        passphrase = base64.b64encode(
-            self.api_passphrase.encode('utf-8')
-        ).decode()
+        # Passphrase should be base64 encoded
+        passphrase = base64.b64encode(self.api_passphrase.encode('utf-8')).decode()
         
         return {
             "KC-API-KEY": self.api_key,
@@ -66,9 +64,9 @@ class KuCoin(Exchange):
 
     def fetch_ticker(self, symbol):
         endpoint = "/api/v1/market/orderbook/level1"
-        params = {"symbol": f"{symbol}-USDT"}
+        params = {"symbol": f"{symbol.upper().replace('_', '-')}"}
         headers = self._generate_signature(endpoint, "GET", params=params)
-        
+
         try:
             response = self.session.get(
                 f"{self.BASE_URL}{endpoint}", 
@@ -76,23 +74,27 @@ class KuCoin(Exchange):
                 headers=headers,
                 timeout=10
             )
-            
-            # Debug logging
             logger.debug(f"KuCoin response: {response.status_code} {response.text}")
-            
+
             if response.status_code == 401:
                 logger.error("❌ Autentikasi KuCoin gagal. Periksa API Key, Secret, dan Passphrase")
                 return 0.0
-            
+
             response.raise_for_status()
             data = response.json()
-            
-            if data.get("code") == "200000" and "data" in data:
-                return float(data["data"]["price"])
+
+            # Pastikan data valid dan struktur lengkap sebelum akses
+            if data and data.get("code") == "200000" and "data" in data and data["data"]:
+                price = data["data"].get("price")
+                if price is not None:
+                    return float(price)
+                else:
+                    logger.error(f"❌ Harga tidak ditemukan di respons KuCoin: {data}")
+                    return 0.0
             else:
-                logger.error(f"❌ Ticker price KuCoin {symbol} tidak ditemukan: {data}")
+                logger.error(f"❌ Format respons tidak valid dari KuCoin: {data}")
                 return 0.0
-                
+
         except Exception as e:
             logger.error(f"❌ Gagal fetch ticker KuCoin {symbol}: {e}")
             return 0.0
@@ -107,6 +109,10 @@ class KuCoin(Exchange):
                 headers=headers,
                 timeout=10
             )
+            
+            # Debug logging
+            logger.debug(f"KuCoin balance response: {response.status_code} {response.text}")
+            
             if response.status_code == 401:
                 logger.error("❌ Autentikasi KuCoin gagal. Periksa API Key, Secret, dan Passphrase")
                 return {}
@@ -148,6 +154,10 @@ class KuCoin(Exchange):
                 headers=headers, 
                 timeout=20
             )
+            
+            # Debug logging
+            logger.debug(f"KuCoin withdrawal response: {response.status_code} {response.text}")
+            
             response.raise_for_status()
             data = response.json()
             if data.get("code") == "200000":

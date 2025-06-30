@@ -27,26 +27,25 @@ class Binance(Exchange):
     def _signed_request(self, method, endpoint, params=None):
         if params is None:
             params = {}
-        
+
         params['timestamp'] = int(time.time() * 1000)
         query_string = urlencode(params, doseq=True)
-        
-        # Buat signature
+
         signature = hmac.new(
             self.api_secret.encode('utf-8'),
             query_string.encode('utf-8'),
             hashlib.sha256
         ).hexdigest()
-        
+
         params['signature'] = signature
-        
+
         url = f"{self.BASE_URL}{endpoint}"
         try:
             if method.upper() == "GET":
                 response = self.session.get(url, params=params, timeout=10)
             else:
                 response = self.session.post(url, data=params, timeout=10)
-            
+
             response.raise_for_status()
             return response.json()
         except Exception as e:
@@ -55,13 +54,22 @@ class Binance(Exchange):
 
     def fetch_ticker(self, symbol):
         try:
-            # Endpoint public tidak memerlukan signature
-            symbol_pair = symbol.upper() + "USDT"
+            # Pastikan symbol uppercase dan sudah lengkap (contoh: BTCUSDT)
+            symbol = symbol.upper()
+            if not symbol.endswith("USDT"):
+                symbol += "USDT"
+
             url = f"{self.BASE_URL}/api/v3/ticker/price"
-            response = self.session.get(url, params={"symbol": symbol_pair}, timeout=10)
+            response = self.session.get(url, params={"symbol": symbol}, timeout=10)
             response.raise_for_status()
             data = response.json()
+
+            if 'price' not in data:
+                logger.error(f"❌ Format respons Binance tidak valid: {data}")
+                return 0.0
+
             return float(data["price"])
+
         except Exception as e:
             logger.error(f"❌ Gagal fetch ticker {symbol}: {e}")
             return 0.0
@@ -83,12 +91,12 @@ class Binance(Exchange):
             'amount': amount,
             'timestamp': int(time.time() * 1000)
         }
-        
+
         if tag:
             params['addressTag'] = tag
         if network:
             params['network'] = network
-        
+
         try:
             data = self._signed_request("POST", "/sapi/v1/capital/withdraw/apply", params)
             return data is not None and 'id' in data
